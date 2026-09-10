@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation as R
@@ -53,6 +54,32 @@ def test_attitude_interface(dynamics: Dynamics):
     dpos = sim.data.states.pos[0, 0] - target_pos
     distance = np.linalg.norm(dpos)
     assert distance < 0.05, f"Failed to maintain hover with {dynamics} ({dpos})"
+
+
+@pytest.mark.integration
+def test_body_rate_interface():
+    sim = Sim(dynamics=Dynamics.first_principles, control=Control.body_rate)
+    # Disable the attitude terms of the firmware controller to track body rates directly
+    body_rate = sim.data.controls.body_rate
+    params = body_rate.params | {"kR": jnp.zeros(3), "ki_m": jnp.zeros(3)}
+    controls = sim.data.controls.replace(body_rate=body_rate.replace(params=params))
+    # Spawn the drone in the air so that it can roll freely without hitting the ground
+    states = sim.data.states.replace(pos=sim.data.states.pos.at[..., 2].set(2.0))
+    sim.data = sim.data.replace(controls=controls, states=states)
+
+    ang_vel_des = np.array([2.0, 0.0, 0.0])  # Roll rate command
+    thrust = sim.data.params.mass[0] * np.linalg.norm(sim.data.params.gravity_vec)
+    cmd = np.concatenate([ang_vel_des, [thrust]])[None, None, :]
+    sim.body_rate_control(cmd)
+
+    errors = []
+    for i in range(sim.control_freq):
+        sim.step(sim.freq // sim.control_freq)
+        if i >= int(0.25 * sim.control_freq):  # Give the controller time to settle on the command
+            errors.append(sim.data.states.ang_vel[0, 0] - ang_vel_des)
+
+    err_max = np.max(np.abs(errors))
+    assert err_max < 0.02, f"Failed to track the body rate command (max error {err_max:.2e})"
 
 
 @pytest.mark.integration
